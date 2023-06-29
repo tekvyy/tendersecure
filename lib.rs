@@ -96,7 +96,25 @@ mod tendersecure {
         pub fn get_proposal_for_bidder(&self, caller: AccountId) -> Option<String> {
             self.bidder_proposals.get(&caller)
         }
-        
+
+        #[ink(message, payable)]
+        pub fn enter(&mut self, url:String) -> Result<()> {
+            if !self.submit_proposal_phase_started {
+                return Err(Error::BiddingNotStarted);
+            }
+            let caller = self.env().caller();
+
+            self.bidders.push(caller);
+            self.bidder_proposals.insert(caller, &url);
+
+            self.env().emit_event(ProposalSubmitted {
+                bidder: caller,
+                value: url,
+            });
+
+            Ok(())
+        }
+
         #[ink(message)]
         pub fn pick_bidder(&mut self, winner_id: AccountId) -> Result<()> {
             if self.bidders.len() == 0 {
