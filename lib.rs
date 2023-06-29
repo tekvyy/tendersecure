@@ -3,42 +3,142 @@
 #[ink::contract]
 mod tendersecure {
 
-    /// Defines the storage of your contract.
-    /// Add new fields to the below struct in order
-    /// to add new static storage fields to your contract.
+    use ink::prelude::string::String;
+    use ink::env::hash::Keccak256;
+    use ink::storage::{Mapping};
+    use ink::prelude::vec::Vec;
+
     #[ink(storage)]
     pub struct Tendersecure {
-        /// Stores a single `bool` value on the storage.
-        value: bool,
+        owner: AccountId,
+        submit_proposal_phase_started: bool,
+        bidders: Vec<AccountId>,
+        bidder_proposals: Mapping<AccountId, String>,
     }
 
+    #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
+    pub enum Error {
+        /// Returned if bidding is not started.
+        BiddingNotStarted,
+        /// Returned if caller is not owner while required to.
+        CallerNotOwner,
+        /// Returned if transfer failed.
+        ErrorTransferringAmount,
+        /// Returned if the bidder has already submitted a proposal.
+        BidderAlreadySubmittedProposal,
+        /// Returned if there are no entries.
+        NoEntries,
+    }
+
+    #[ink(event)]
+    pub struct ProposalSubmitted {
+        bidder: AccountId,
+        value: String,
+    }
+
+    #[ink(event)]
+    pub struct Won {
+        /// The winner.
+        winner: AccountId,
+        /// The winning amount.
+        amount: Balance,
+    }
+
+    /// Type alias for the contract's result type.
+    pub type Result<T> = core::result::Result<T, Error>;
+
     impl Tendersecure {
-        /// Constructor that initializes the `bool` value to the given `init_value`.
+        /// Creates a new tender secure contract initialized.
         #[ink(constructor)]
-        pub fn new(init_value: bool) -> Self {
-            Self { value: init_value }
+        pub fn new() -> Self {
+            Self {
+                owner: Self::env().caller(),
+                submit_proposal_phase_started: false,
+                bidders: Vec::new(),
+                bidder_proposals: Mapping::default(),
+            }
         }
 
-        /// Constructor that initializes the `bool` value to `false`.
-        ///
-        /// Constructors can delegate to other constructors.
-        #[ink(constructor)]
-        pub fn default() -> Self {
-            Self::new(Default::default())
-        }
-
-        /// A message that can be called on instantiated contracts.
-        /// This one flips the value of the stored `bool` from `true`
-        /// to `false` and vice versa.
+        /// Returns the owner of the Contract
         #[ink(message)]
-        pub fn flip(&mut self) {
-            self.value = !self.value;
+        pub fn owner(&self) -> AccountId {
+            self.owner
         }
 
-        /// Simply returns the current value of our `bool`.
         #[ink(message)]
-        pub fn get(&self) -> bool {
-            self.value
+        pub fn get_tender_amount(&self) -> Balance {
+            self.env().balance()
+        }
+
+        #[ink(message)]
+        pub fn can_submit_proposal(&self) -> bool {
+            self.submit_proposal_phase_started
+        }
+
+        #[ink(message, payable)]
+        pub fn submit_tender_amount(&self) -> Result<Balance> {
+            if self.env().caller() != self.owner {
+                return Err(Error::CallerNotOwner);
+            }
+
+            Ok(Self::env().balance())
+        }
+
+        /// Returns the list of bidders
+        #[ink(message)]
+        pub fn get_bidders(&self) -> Vec<AccountId> {
+            self.bidders.clone()
+        }
+
+        /// Retrieve the balance of the account.
+        #[ink(message)]
+        pub fn get_proposal_for_bidder(&self, caller: AccountId) -> Option<String> {
+            self.bidder_proposals.get(&caller)
+        }
+        
+        #[ink(message)]
+        pub fn pick_bidder(&mut self, winner_id: AccountId) -> Result<()> {
+            if self.bidders.len() == 0 {
+                return Err(Error::NoEntries);
+            }
+
+            let winner = winner_id;
+            let amount: Balance = self.env().balance();
+
+            if self.env().transfer(winner, amount).is_err() {
+                return Err(Error::ErrorTransferringAmount);
+            }
+
+            for bidder in self.bidders.iter() {
+                self.bidder_proposals.remove(bidder);
+            }
+
+            self.bidders = Vec::new();
+
+            self.env().emit_event(Won { winner, amount });
+
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn start_bidding_for_tender(&mut self) -> Result<()> {
+            if self.env().caller() != self.owner {
+                return Err(Error::CallerNotOwner);
+            }
+            self.submit_proposal_phase_started = true;
+
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn stop_bidding_for_tender(&mut self) -> Result<()> {
+            if self.env().caller() != self.owner {
+                return Err(Error::CallerNotOwner);
+            }
+            self.submit_proposal_phase_started = false;
+
+            Ok(())
         }
     }
 
@@ -47,24 +147,7 @@ mod tendersecure {
     /// The below code is technically just normal Rust code.
     #[cfg(test)]
     mod tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
-        use super::*;
 
-        /// We test if the default constructor does its job.
-        #[ink::test]
-        fn default_works() {
-            let tendersecure = Tendersecure::default();
-            assert_eq!(tendersecure.get(), false);
-        }
-
-        /// We test a simple use case of our contract.
-        #[ink::test]
-        fn it_works() {
-            let mut tendersecure = Tendersecure::new(false);
-            assert_eq!(tendersecure.get(), false);
-            tendersecure.flip();
-            assert_eq!(tendersecure.get(), true);
-        }
     }
 
 
@@ -75,68 +158,6 @@ mod tendersecure {
     /// - Are running a Substrate node which contains `pallet-contracts` in the background
     #[cfg(all(test, feature = "e2e-tests"))]
     mod e2e_tests {
-        /// Imports all the definitions from the outer scope so we can use them here.
-        use super::*;
 
-        /// A helper function used for calling contract messages.
-        use ink_e2e::build_message;
-
-        /// The End-to-End test `Result` type.
-        type E2EResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-        /// We test that we can upload and instantiate the contract using its default constructor.
-        #[ink_e2e::test]
-        async fn default_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
-            // Given
-            let constructor = TendersecureRef::default();
-
-            // When
-            let contract_account_id = client
-                .instantiate("tendersecure", &ink_e2e::alice(), constructor, 0, None)
-                .await
-                .expect("instantiate failed")
-                .account_id;
-
-            // Then
-            let get = build_message::<TendersecureRef>(contract_account_id.clone())
-                .call(|tendersecure| tendersecure.get());
-            let get_result = client.call_dry_run(&ink_e2e::alice(), &get, 0, None).await;
-            assert!(matches!(get_result.return_value(), false));
-
-            Ok(())
-        }
-
-        /// We test that we can read and write a value from the on-chain contract contract.
-        #[ink_e2e::test]
-        async fn it_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
-            // Given
-            let constructor = TendersecureRef::new(false);
-            let contract_account_id = client
-                .instantiate("tendersecure", &ink_e2e::bob(), constructor, 0, None)
-                .await
-                .expect("instantiate failed")
-                .account_id;
-
-            let get = build_message::<TendersecureRef>(contract_account_id.clone())
-                .call(|tendersecure| tendersecure.get());
-            let get_result = client.call_dry_run(&ink_e2e::bob(), &get, 0, None).await;
-            assert!(matches!(get_result.return_value(), false));
-
-            // When
-            let flip = build_message::<TendersecureRef>(contract_account_id.clone())
-                .call(|tendersecure| tendersecure.flip());
-            let _flip_result = client
-                .call(&ink_e2e::bob(), flip, 0, None)
-                .await
-                .expect("flip failed");
-
-            // Then
-            let get = build_message::<TendersecureRef>(contract_account_id.clone())
-                .call(|tendersecure| tendersecure.get());
-            let get_result = client.call_dry_run(&ink_e2e::bob(), &get, 0, None).await;
-            assert!(matches!(get_result.return_value(), true));
-
-            Ok(())
-        }
     }
 }
